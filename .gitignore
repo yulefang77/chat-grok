@@ -1,0 +1,8 @@
+# envrironment variables
+.env
+# folders
+static
+# files
+generate_image.py
+conversation_context.py
+received_image.jpg
