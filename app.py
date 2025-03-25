@@ -279,14 +279,14 @@ def callback():
         logger.warning("Invalid signature. Please check your channel access token/channel secret.")
         abort(400)
     return 'OK' 
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     with line_service.get_api_client() as api_client:
         line_bot_api = line_service.get_bot_api(api_client)
-
-        if event.source.group_id not in Config.ALLOWED_GROUPS: 
-            print(event.source.group_id)
-            return   
+        
+        # 輸出來源類型以便除錯
+        print(f"來源類型: {event.source.type}")
     
         user_id = event.source.user_id            
         profile = line_service.get_profile(line_bot_api, user_id)
@@ -295,17 +295,29 @@ def handle_message(event):
         # 初始化用戶會話上下文
         conversation_manager.initialize_user(user_id, display_name)
 
-        # 處理訊息: 移除 "@開發測試用" 前綴
+        # 處理訊息：移除 "@穆阿迪布" 前綴
         user_input = event.message.text
         should_reply = False
         
-        if user_input.startswith("@開發測試用"):
-            user_input = user_input[len("@開發測試用"):].strip()
-            # 發送思考中的訊息
+        if user_input.startswith("@穆阿迪布"):
+            user_input = user_input[len("@穆阿迪布"):].strip()
+            # 當使用者輸入 help 指令，回覆使用說明
+            if user_input.strip() == "help":
+                help_text = (
+                    "【使用說明】\n"
+                    "1. 請直接輸入您的問題，Bot 將依據上下文給出回覆。\n"
+                    "2. 若在問題前加上 '@穆阿迪布'，Bot 會先發送思考中的訊息。\n"
+                    "3. 輸入 /help 可隨時查看這個使用說明。\n"
+                    "4. 上傳圖片會自動解讀內容。"
+                )
+                line_service.send_reply(line_bot_api, event.reply_token, help_text)
+                return
+        
+            # 發送思考中的臨時訊息
             line_service.send_thinking_message(line_bot_api, event.reply_token)
             should_reply = True
-        
-        # 獲取回覆
+
+        # 獲取 AI 回覆
         reply_result = ai_service.get_reply(
             message=user_input,
             context=conversation_manager.get_context(user_id),
@@ -318,17 +330,25 @@ def handle_message(event):
         if reply_result.is_question and (should_reply or random.random() < 0.3):
             conversation_manager.update_context(user_id, event.message.text, reply_result.answer)
             
-            # 使用推送訊息進行最終回覆
-            line_service.send_push_message(line_bot_api, event.source.group_id, reply_result.answer)
+            # 根據來源類型設定推送訊息的目標 ID
+            target_id = None
+            if event.source.type == "group":
+                target_id = event.source.group_id
+            elif event.source.type == "room":
+                target_id = event.source.room_id
+            elif event.source.type == "user":
+                target_id = event.source.user_id
+            
+            if target_id:
+                line_service.send_push_message(line_bot_api, target_id, reply_result.answer)
 
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     with line_service.get_api_client() as api_client:
         line_bot_api = line_service.get_bot_api(api_client)
         
-        if event.source.group_id not in Config.ALLOWED_GROUPS: 
-            print(event.source.group_id)
-            return 
+        # 輸出來源類型方便除錯
+        print(f"來源類型: {event.source.type}")
         
         # 獲取圖片內容
         image_content = line_service.get_image_content(event.message.id)
@@ -336,16 +356,15 @@ def handle_image_message(event):
             line_service.send_reply(line_bot_api, event.reply_token, "抱歉，無法處理此圖片。")
             return
             
-        # 固定圖片檔名為 received_image.jpg
+        # 儲存圖片（名稱固定為 received_image.jpg）
         image_filename = "received_image.jpg"
         image_path = IMAGES_FOLDER / image_filename
         
-        # 儲存圖片 (覆蓋原有檔案)
         with open(image_path, "wb") as f:
             f.write(image_content)
-        logger.info(f"Saved image as {image_path}")
+        logger.info(f"已儲存圖片：{image_path}")
         
-        # 分析圖片
+        # 分析圖片內容
         analyzed_text = ai_service.analyze_image(str(image_path))
         
         # 發送回覆

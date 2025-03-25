@@ -7,13 +7,14 @@
 - **自動人設切換**：根據使用者名稱自動選擇不同的對話風格與回覆內容。
 - **智能問答**：利用 X.AI (Grok) 模型即時回覆使用者提問。
 - **圖片分析**：支援圖片上傳，將圖片下載並存放於 `static/images` 資料夾中（固定檔名為 `received_image.jpg`），並進行內容與細節的分析。
-- **群組支援**：在特定允許的 LINE 群組內運作，可於 `.env` 中透過 `ALLOWED_GROUPS` 變數進行設定。
+- **群組支援**：除了允許指定群組外，目前也支援個別聊天室與一對一聊天模式。
+- **指令使用**：推送文字給聊天機器人，在文字訊息中輸入 `help` 可取得使用說明，支援多種互動指令。
 - **環境變數管理**：使用 `python-dotenv` 載入環境變數，方便進行憑證與 API 金鑰的管理。
 
 ## 技術架構
 - **Flask**：輕量級 Python Web 框架。
 - **LINE Bot SDK (v3)**：與 LINE 平台進行訊息互動。
-- **OpenAI API**：提供 AI 模型回應及圖片分析功能。
+- **OpenAI API**：提供 AI 模型回覆及圖片分析功能。
 - **Pydantic**：用於建立與驗證數據模型。
 - **python-dotenv**：管理環境變數。
 - **Requests**：處理 HTTP 請求。
@@ -59,13 +60,14 @@
 
 ## 專案結構
 line-bot-xai/
-├── app.py # 主程式，包含 LINE Bot 與 AI 服務邏輯
-├── requirements.txt # 相依套件列表
-├── .env # 環境變數設定檔（不納入版本控制）
+├── app.py               # 主程式，包含 LINE Bot 與 AI 服務邏輯
+├── join.py              # 測試或輔助腳本
+├── requirements.txt     # 相依套件列表
+├── .env                 # 環境變數設定檔（不納入版本控制）
 ├── static/
-│ └── images/ # 存放下載的圖片 (固定檔名: received_image.jpg)
-├── .gitignore # Git 忽略檔案設定
-└── README.md # 使用說明文件
+│   └── images/          # 存放下載的圖片 (固定檔名: received_image.jpg)
+├── .gitignore           # Git 忽略檔案設定
+└── README.md            # 使用說明文件
 
 ## 版本說明
 - **v1.1.0 (2023-12-15)**：新增圖片分析功能，將下載的圖片存至 `static/images` 資料夾中，檔名固定為 `received_image.jpg`，並透過 `ALLOWED_GROUPS` 控制群組的存取權限。
