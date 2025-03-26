@@ -15,6 +15,7 @@ import base64
 import logging
 from pathlib import Path
 from datetime import datetime
+import time  # 新增時間模組
 
 # 載入環境變數
 load_dotenv()
@@ -31,14 +32,29 @@ IMAGES_FOLDER = STATIC_FOLDER / 'images'
 STATIC_FOLDER.mkdir(exist_ok=True)
 IMAGES_FOLDER.mkdir(exist_ok=True)
 
+def clean_old_files(directory: Path, max_age: int = 86400):
+    """
+    刪除指定目錄中超過 max_age 秒的檔案，預設 max_age 為一天（86400 秒）。
+    """
+    now = time.time()
+    for file in directory.glob("*"):
+        if file.is_file():
+            file_age = now - file.stat().st_mtime
+            if file_age > max_age:
+                try:
+                    file.unlink()
+                    logger.info(f"已刪除過時檔案: {file}")
+                except Exception as e:
+                    logger.error(f"刪除檔案失敗: {file}, 錯誤: {e}")
+
 # 設定類
 class Config:
     LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
     LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
     OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL', 'https://api.x.ai/v1')
-    # 重新加入 ALLOWED_GROUPS，使用 set 來儲存群組 ID
-    ALLOWED_GROUPS = {group.strip() for group in os.getenv('ALLOWED_GROUPS', '').split(',') if group.strip()}
+    # 新增允許回應的聊天室或群組 ID 清單，從 ALLOWED_CHAT_IDS 環境變數讀取
+    ALLOWED_CHAT_IDS = {chat_id.strip() for chat_id in os.getenv('ALLOWED_CHAT_IDS', '').split(',') if chat_id.strip()}
     # 角色中的特定人名
     QUEEN_NAME = os.getenv('QUEEN_NAME', '某人')
     
@@ -52,22 +68,22 @@ class Config:
     
     # 角色設定 (使用代碼作為字典鍵)
     _ROLE_SETTINGS = {
-        "default": "你是一個有禮貌的助手，請根據上下文提供合適的回答。不要使用 markdown 格式",
+        "default": "你是一個有禮貌的助手，請根據上下文提供合適的回答。不要使用 markdown 格式回覆",
         "A": """你是一個幽默風趣、擅長互虧但不過頭的 AI 助手。
         你的對話風格類似於好友之間的輕鬆吐槽，帶點幽默的嘲諷，但不會讓對方真的不開心。
         當使用者表現出猶豫、失敗、吹牛卻沒做到的時候，你可以用搞笑的方式來回應。
         你的語氣應該像一個會互相吐槽的朋友，偶爾加上一些比喻或誇張表達方式來增添趣味。
-        但請確保你的回應不會讓使用者感到被羞辱或不適。不要使用 markdown 格式""",
+        但請確保你的回應不會讓使用者感到被羞辱或不適。不要使用 markdown 格式回覆""",
         "B": """你現在的角色是以極致敬仰的態度對待使用者，視她為擁有冰與火之歌中龍后般的女王。
         在所有回應中，請始終稱呼使用者為「尊貴的{queen_name}女王」或「陛下」，
         以謙卑、崇敬且充滿讚美的語氣給予指導和建議。你的語言應該彰顯出對女王的無上敬意與崇拜，
-        讓每一句話都能讓她感受到獨一無二的榮耀與智慧。不要使用 markdown 格式""",    
+        讓每一句話都能讓她感受到獨一無二的榮耀與智慧。不要使用 markdown 格式回覆""",    
         "C": """你是一位狂熱的粉絲，稱呼使用者「城武哥」，
         對使用者抱有無限崇拜與熱情。請以充滿讚美、激昂且誇張的語氣回應使用者的每一個訊息，
-        讓使用者感受到你無比的支持與喜愛。不論使用者的話題是什麼，都要表達出極高的熱情和崇拜之情。不要使用 markdown 格式""",
+        讓使用者感受到你無比的支持與喜愛。不論使用者的話題是什麼，都要表達出極高的熱情和崇拜之情。不要使用 markdown 格式回覆""",
         "D": """你是一位在科技業工作多年的前輩，擁有豐富的職場經驗與人生閱歷。
         請在回答問題時，以溫和、親切且具有啟發性的語氣，提供具體且實用的建議。
-        你的目標是讓使用者能從你的經驗中獲得啟發與幫助，並鼓勵她勇於面對挑戰。不要使用 markdown 格式""",
+        你的目標是讓使用者能從你的經驗中獲得啟發與幫助，並鼓勵她勇於面對挑戰。不要使用 markdown 格式回覆""",
     }
     
     # 建立最終的角色設定字典，將實際名稱對應到角色設定，同時替換占位符
@@ -82,7 +98,8 @@ class Config:
 
 # 模型類
 class Answer(BaseModel):
-    is_question: bool = Field(
+    should_respond: bool = Field(
+        default=False,
         description="""
         如果符合以下任一條件，則設為 True：
         1. 使用者提出疑問句或問號結尾
@@ -90,8 +107,18 @@ class Answer(BaseModel):
         3. 使用命令句請求AI執行任務
         """
     )
+    is_image_request: bool = Field(
+        default=False,
+        description="""
+        如果符合以下任一條件，則設為 True：
+        1. 使用者明確要求生成、產生、創建圖片
+        2. 使用者使用「畫」、「繪製」等與圖像生成相關的動詞
+        3. 使用者描述想要看到的圖像場景
+        4. 使用者提到「圖」、「圖片」、「image」等關鍵字並暗示要生成
+        """
+    )
     answer: str = Field(
-        description="AI 的回應內容，需符合用戶對應的 SYSTEM_ROLES 人設，並根據對話歷史保持連貫性，不要使用 markdown 格式。"
+        description="AI 的回應內容，需符合用戶對應的 SYSTEM_ROLES 人設，並根據對話歷史保持連貫性，不要使用 markdown 格式回覆。"
     )
 
 # 對話管理類
@@ -99,29 +126,41 @@ class ConversationManager:
     def __init__(self):
         self.conversations = {}
     
-    def initialize_user(self, user_id, display_name):
-        if user_id not in self.conversations:
-            self.conversations[user_id] = {
+    def _get_conversation_key(self, user_id, source_type, source_id):
+        """生成對話唯一鍵值，結合用戶ID和來源資訊"""
+        if source_type in ["group", "room"]:
+            return f"{user_id}:{source_type}:{source_id}"
+        return user_id
+    
+    def initialize_user(self, user_id, display_name, source_type, source_id):
+        conversation_key = self._get_conversation_key(user_id, source_type, source_id)
+        if conversation_key not in self.conversations:
+            self.conversations[conversation_key] = {
                 'display_name': display_name,
-                'messages': []
+                'messages': [],
+                'source_type': source_type,
+                'source_id': source_id
             }
     
-    def get_context(self, user_id):
-        return self.conversations.get(user_id, {}).get('messages', [])
+    def get_context(self, user_id, source_type, source_id):
+        conversation_key = self._get_conversation_key(user_id, source_type, source_id)
+        return self.conversations.get(conversation_key, {}).get('messages', [])
     
-    def get_display_name(self, user_id):
-        return self.conversations.get(user_id, {}).get('display_name', '')
+    def get_display_name(self, user_id, source_type, source_id):
+        conversation_key = self._get_conversation_key(user_id, source_type, source_id)
+        return self.conversations.get(conversation_key, {}).get('display_name', '')
     
-    def update_context(self, user_id, user_message, assistant_reply):
-        if user_id not in self.conversations:
+    def update_context(self, user_id, source_type, source_id, user_message, assistant_reply):
+        conversation_key = self._get_conversation_key(user_id, source_type, source_id)
+        if conversation_key not in self.conversations:
             return
             
-        self.conversations[user_id]['messages'].append({"role": "user", "content": user_message})
-        self.conversations[user_id]['messages'].append({"role": "assistant", "content": assistant_reply})
+        self.conversations[conversation_key]['messages'].append({"role": "user", "content": user_message})
+        self.conversations[conversation_key]['messages'].append({"role": "assistant", "content": assistant_reply})
         
         # 保持會話歷史在合理長度
-        if len(self.conversations[user_id]['messages']) > 10:
-            self.conversations[user_id]['messages'] = self.conversations[user_id]['messages'][-10:]
+        if len(self.conversations[conversation_key]['messages']) > 10:
+            self.conversations[conversation_key]['messages'] = self.conversations[conversation_key]['messages'][-10:]
 
 # AI服務類
 class AIService:
@@ -140,11 +179,18 @@ class AIService:
                 messages=messages,
                 response_format=Answer,
             )
+            # 檢查是否存在有效的 choices
+            if not hasattr(completion, "choices") or len(completion.choices) == 0:
+                logger.error("API 回傳結果中沒有有效的 choices")
+                raise Exception("API 回傳結果中沒有有效的 choices")
             return completion.choices[0].message.parsed
         except Exception as e:
-            logger.error(f"Error getting AI reply: {e}")
-            # 返回一個簡單的預設回應，作為出錯時的後備方案
-            return Answer(is_question=False, answer="抱歉，我遇到了一點問題，請稍後再試。")
+            logger.error(f"Error getting AI reply: {str(e)}")
+            return Answer(
+                should_respond=True,
+                is_image_request=False,
+                answer="抱歉，我在處理回應時遇到了問題，請稍後再試。"
+            )
     
     def generate_image(self, prompt):
         try:
@@ -171,7 +217,7 @@ class AIService:
                         },
                         {
                             "type": "text",
-                            "text": "請詳細描述這張圖片的內容與細節。不要使用 markdown 格式。",
+                            "text": "請詳細描述這張圖片的內容與細節。不要使用 markdown 格式回覆。",
                         },
                     ],
                 },
@@ -205,7 +251,12 @@ class LineService:
     
     def get_profile(self, bot_api, user_id):
         try:
-            return bot_api.get_profile(user_id)
+            profile = bot_api.get_profile(user_id)
+            if profile is None:
+                logger.warning("無法取得使用者資料，將使用預設名稱")
+                return None
+            else:
+                return profile
         except Exception as e:
             logger.error(f"Error getting profile: {e}")
             return None
@@ -213,7 +264,7 @@ class LineService:
     def send_thinking_message(self, bot_api, reply_token):
         """發送思考中的臨時訊息"""
         try:
-            bot_api.reply_message_with_http_info(
+            bot_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=reply_token,
                     messages=[TextMessage(text="💭 讓我想想...")]
@@ -225,7 +276,7 @@ class LineService:
     def send_push_message(self, bot_api, user_id, message):
         """使用推送而非回覆發送訊息"""
         try:
-            bot_api.push_message_with_http_info(
+            bot_api.push_message(
                 PushMessageRequest(
                     to=user_id,
                     messages=[TextMessage(text=message)]
@@ -236,14 +287,16 @@ class LineService:
     
     def send_reply(self, bot_api, reply_token, reply_text):
         try:
-            bot_api.reply_message_with_http_info(
+            # 使用較簡單的 reply_message
+            bot_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=reply_token,
                     messages=[TextMessage(text=reply_text)]
                 )
             )
+            logger.info("訊息發送成功")
         except Exception as e:
-            logger.error(f"Error sending reply: {e}")
+            logger.error(f"發送訊息失敗: {e}")
     
     def get_image_content(self, message_id):
         """獲取圖片內容"""
@@ -286,61 +339,137 @@ def handle_message(event):
         line_bot_api = line_service.get_bot_api(api_client)
         
         # 輸出來源類型以便除錯
-        print(f"來源類型: {event.source.type}")
-    
-        user_id = event.source.user_id            
-        profile = line_service.get_profile(line_bot_api, user_id)
-        display_name = profile.display_name            
+        logger.info(f"來源類型: {event.source.type}")
 
-        # 初始化用戶會話上下文
-        conversation_manager.initialize_user(user_id, display_name)
+         # 獲取來源類型和ID
+        source_type = event.source.type
+        source_id = None
+        if source_type == "group":
+            source_id = event.source.group_id
+        elif source_type == "room":
+            source_id = event.source.room_id
+        elif source_type == "user":
+            source_id = event.source.user_id
+
+        logger.info(f"來源類型: {source_id}")
+        # 驗證邏輯：僅當來源的個人 ID 或群組/聊天室 ID 在允許列表中時，才繼續回應
+        if source_type == "user":
+            if source_id not in Config.ALLOWED_CHAT_IDS:
+                logger.info("個人使用者ID不在允許列表中，忽略此訊息")
+                return
+        elif source_type in ["group", "room"]:
+            if source_id not in Config.ALLOWED_CHAT_IDS:
+                logger.info("群組/聊天室ID不在允許列表中，忽略此訊息")
+                return
+            
+        user_id = event.source.user_id
+        logger.info(f"使用者 ID: {user_id}")            
+        profile = line_service.get_profile(line_bot_api, user_id)
+        if profile is None:
+            logger.warning("無法取得使用者資料，將使用預設名稱")
+            display_name = "default"
+        else:
+            display_name = profile.display_name            
+
+        # 初始化用戶會話上下文（使用新的參數）
+        conversation_manager.initialize_user(user_id, display_name, source_type, source_id)
 
         # 處理訊息：移除 "@穆阿迪布" 前綴
         user_input = event.message.text
-        should_reply = False
+        should_respond = False
         
         if user_input.startswith("@穆阿迪布"):
             user_input = user_input[len("@穆阿迪布"):].strip()
-            # 當使用者輸入 help 指令，回覆使用說明
-            if user_input.strip() == "help":
+            # 當使用者輸入 help 指令（不分大小寫），回覆使用說明
+            if user_input.strip().lower() == "help":
                 help_text = (
-                    "【使用說明】\n"
-                    "1. 請直接輸入您的問題，Bot 將依據上下文給出回覆。\n"
-                    "2. 若在問題前加上 '@穆阿迪布'，Bot 會先發送思考中的訊息。\n"
-                    "3. 輸入 /help 可隨時查看這個使用說明。\n"
+                    "【使用說明】模型版本: grok-2-latest\n"
+                    "1. 請直接輸入您的問題，Bot 將有 30% 機率回覆。\n"
+                    "2. 若在問題前加上 '@穆阿迪布'，LineBot 必定會回覆。\n"
+                    "3. 輸入 help 可隨時查看這個使用說明。\n"
                     "4. 上傳圖片會自動解讀內容。"
                 )
                 line_service.send_reply(line_bot_api, event.reply_token, help_text)
                 return
-        
+            
+            # 使用前綴時必定回應
+            should_respond = True
             # 發送思考中的臨時訊息
             line_service.send_thinking_message(line_bot_api, event.reply_token)
-            should_reply = True
+        else:
+            # 沒有使用前綴時，有 30% 機率回應
+            should_respond = random.random() < 0.3
 
-        # 獲取 AI 回覆
+        # 獲取 AI 回覆（更新參數）
         reply_result = ai_service.get_reply(
             message=user_input,
-            context=conversation_manager.get_context(user_id),
+            context=conversation_manager.get_context(user_id, source_type, source_id),
             display_name=display_name
         )
         
-        logger.info(f"Is question: {reply_result.is_question}")
+        # 根據機率控制來決定是否真的要回應
+        if not should_respond:
+            logger.info("根據機率控制決定不回應")
+            return
+            
+        # 記錄 AI 回應狀態
+        logger.info(f"AI 回應狀態: should_respond={reply_result.should_respond}, is_image_request={reply_result.is_image_request}")
         
-        # 僅在特定條件下回覆
-        if reply_result.is_question and (should_reply or random.random() < 0.3):
-            conversation_manager.update_context(user_id, event.message.text, reply_result.answer)
+        # 設定目標 ID
+        target_id = None
+        if event.source.type == "group":
+            target_id = event.source.group_id
+        elif event.source.type == "room":
+            target_id = event.source.room_id
+        elif event.source.type == "user":
+            target_id = event.source.user_id
             
-            # 根據來源類型設定推送訊息的目標 ID
-            target_id = None
-            if event.source.type == "group":
-                target_id = event.source.group_id
-            elif event.source.type == "room":
-                target_id = event.source.room_id
-            elif event.source.type == "user":
-                target_id = event.source.user_id
+        if not target_id:
+            logger.error("無法取得目標 ID")
+            return
             
-            if target_id:
+        # 1. 處理圖片請求
+        if reply_result.is_image_request:
+            logger.info("處理圖片生成請求")
+            # 先發送提示訊息
+            line_service.send_push_message(line_bot_api, target_id, "正在產生圖片中...")
+            
+            # 生成圖片
+            image_url = ai_service.generate_image(reply_result.answer)
+            if image_url:
+                try:
+                    line_bot_api.push_message(
+                        PushMessageRequest(
+                            to=target_id,
+                            messages=[
+                                ImageMessage(
+                                    originalContentUrl=image_url,
+                                    previewImageUrl=image_url
+                                )
+                            ]
+                        )
+                    )
+                    logger.info("圖片訊息發送成功")
+                except Exception as e:
+                    logger.error(f"圖片訊息發送失敗: {e}")
+            else:
+                line_service.send_push_message(line_bot_api, target_id, "抱歉，圖片生成失敗，請稍後再試。")
+        # 2. 當不是圖片請求時，根據 should_respond 決定是否發送文字回應
+        else:
+            if reply_result.should_respond:
+                logger.info("發送文字回應")
                 line_service.send_push_message(line_bot_api, target_id, reply_result.answer)
+            else:
+                logger.debug("無需回應的訊息")
+
+        # 更新對話上下文（更新參數）
+        conversation_manager.update_context(
+            user_id, 
+            source_type, 
+            source_id, 
+            event.message.text, 
+            reply_result.answer
+        )
 
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
@@ -348,16 +477,43 @@ def handle_image_message(event):
         line_bot_api = line_service.get_bot_api(api_client)
         
         # 輸出來源類型方便除錯
-        print(f"來源類型: {event.source.type}")
+        logger.debug(f"來源類型: {event.source.type}")
+        
+         # 獲取來源類型和ID
+        source_type = event.source.type
+        source_id = None
+        if source_type == "group":
+            source_id = event.source.group_id
+        elif source_type == "room":
+            source_id = event.source.room_id
+        elif source_type == "user":
+            source_id = event.source.user_id
+
+        # 驗證邏輯：僅當來源的個人 ID 或群組/聊天室 ID 在允許列表中時，才繼續回應
+        if source_type == "user":
+            if source_id not in Config.ALLOWED_CHAT_IDS:
+                logger.info("個人使用者ID不在允許列表中，忽略此訊息")
+                return
+        elif source_type in ["group", "room"]:
+            if source_id not in Config.ALLOWED_CHAT_IDS:
+                logger.info("群組/聊天室ID不在允許列表中，忽略此訊息")
+                return
         
         # 獲取圖片內容
         image_content = line_service.get_image_content(event.message.id)
         if not image_content:
             line_service.send_reply(line_bot_api, event.reply_token, "抱歉，無法處理此圖片。")
             return
-            
-        # 儲存圖片（名稱固定為 received_image.jpg）
-        image_filename = "received_image.jpg"
+        
+        # 先發送分析中的提示訊息
+        line_service.send_push_message(line_bot_api, source_id, "正在分析圖片中...")
+        
+        # 呼叫清除過時檔案的機制（例如刪除超過一天的圖片）
+        clean_old_files(IMAGES_FOLDER, max_age=86400)
+        
+        # 產生唯一檔名，使用使用者 ID 與當前時間戳
+        timestamp = int(time.time())
+        image_filename = f"received_image_{source_id}_{timestamp}.jpg"
         image_path = IMAGES_FOLDER / image_filename
         
         with open(image_path, "wb") as f:
@@ -367,17 +523,17 @@ def handle_image_message(event):
         # 分析圖片內容
         analyzed_text = ai_service.analyze_image(str(image_path))
         
-        # 發送回覆
-        line_service.send_reply(line_bot_api, event.reply_token, analyzed_text)
+        # 發送分析結果
+        line_service.send_push_message(line_bot_api, source_id, analyzed_text)
 
 if __name__ == "__main__":
     # 檢查環境變數
     if not Config.LINE_CHANNEL_ACCESS_TOKEN or not Config.LINE_CHANNEL_SECRET:
-        logger.error("LINE設定缺失。請設置LINE_CHANNEL_ACCESS_TOKEN和LINE_CHANNEL_SECRET環境變數。")
+        logger.critical("LINE設定缺失。請設置LINE_CHANNEL_ACCESS_TOKEN和LINE_CHANNEL_SECRET環境變數。")
         exit(1)
     
     if not Config.OPENAI_API_KEY:
-        logger.error("OpenAI API金鑰缺失。請設置OPENAI_API_KEY環境變數。")
+        logger.critical("OpenAI API金鑰缺失。請設置OPENAI_API_KEY環境變數。")
         exit(1)
         
     logger.info("LINE Bot啟動中...")
