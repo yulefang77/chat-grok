@@ -59,16 +59,16 @@
    若須本地測試，可使用 [ngrok](https://ngrok.com/) 將本地端口公開，將生成的 URL 配置到 LINE 開發者控制台的 Webhook URL。
 
 ## 專案結構
+```
 line-bot-xai/
 ├── app.py               # 主程式，包含 LINE Bot 與 AI 服務邏輯
-├── join.py              # 測試或輔助腳本
 ├── requirements.txt     # 相依套件列表
 ├── .env                 # 環境變數設定檔（不納入版本控制）
 ├── static/
 │   └── images/          # 存放下載的圖片 (檔名格式: received_image_{user_id}_{timestamp}.jpg)
 ├── .gitignore           # Git 忽略檔案設定
 └── README.md            # 使用說明文件
-
+```
 ## 版本說明
 - **v1.1.0 (2023-12-15)**：新增圖片分析功能，將下載的圖片存至 `static/images` 資料夾中，檔名固定為 `received_image.jpg`，並透過 `ALLOWED_GROUPS` 控制群組的存取權限。
 - **v1.0.0 (2023-12-01)**：初始版本，上線基本的問答與多角色人設切換功能。
