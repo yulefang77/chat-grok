@@ -65,7 +65,7 @@ line-bot-xai/
 ├── requirements.txt     # 相依套件列表
 ├── .env                 # 環境變數設定檔（不納入版本控制）
 ├── static/
-│   └── images/          # 存放下載的圖片 (固定檔名: received_image.jpg)
+│   └── images/          # 存放下載的圖片 (檔名格式: received_image_{user_id}_{timestamp}.jpg)
 ├── .gitignore           # Git 忽略檔案設定
 └── README.md            # 使用說明文件
 
