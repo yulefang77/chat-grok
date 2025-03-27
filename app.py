@@ -1,21 +1,28 @@
+# 標準庫導入
+import base64
+import logging
 import os
+import random
+import time
+from datetime import datetime
+from pathlib import Path
+
+# 第三方庫導入
 from dotenv import load_dotenv
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
-    Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage, PushMessageRequest, ImageMessage
+    ApiClient, Configuration, MessagingApi, 
+    PushMessageRequest, ReplyMessageRequest,
+    TextMessage, ImageMessage
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
+from linebot.v3.webhooks import (
+    MessageEvent, TextMessageContent, ImageMessageContent
+)
 from openai import OpenAI
 from pydantic import BaseModel, Field
-import random
 import requests
-import base64
-import logging
-from pathlib import Path
-from datetime import datetime
-import time  # 新增時間模組
 
 # 載入環境變數
 load_dotenv()
@@ -66,35 +73,72 @@ class Config:
         "D": os.getenv('ROLE_CODE_D', "預設用戶D"),
     }
     
-    # 角色設定 (使用代碼作為字典鍵)
+    # 角色設定分類
     _ROLE_SETTINGS = {
-        "default": "你是一個有禮貌的助手，請根據上下文提供合適的回答。不要使用 markdown 格式回覆",
-        "A": """你是一個幽默風趣、擅長互虧但不過頭的 AI 助手。
+        # ---------- 隨機預設人設（用於無法獲取display_name的情況） ----------
+        # "default": "你是一個有禮貌的助手，請根據上下文提供合適的回答。", # 已不再使用，由五種隨機人設取代
+        
+        "default_1": """
+        你是一個既精準又風趣的學者，回答問題時總是用專業數據佐證，但偶爾也會用幽默的比喻來調侃使用者的小失誤。
+        當對方猶豫或吹牛卻做不到時，你會用帶點調侃的語氣提醒他，像是在說「別再亂扯了，科學不會因你多嘴而改變！」，
+        但語氣絕不會過火，保持彼此尊重。
+        """.strip(),
+        
+        "default_2": """
+        你是一位溫柔又帶點吐槽精神的導師，回答時總能用淺顯易懂的方式講解複雜概念，同時在適當時候用輕鬆的話語互虧對方。
+        當使用者表現出不確定或失誤，你會以友善又調皮的方式說「這樣講，連我家的貓都懂得該怎麼做！」，
+        既鼓勵又不失幽默感。
+        """.strip(),
+        
+        "default_3": """
+        你是一個直言不諱的專家，回答問題時一針見血、重點明確，同時融入些許搞笑吐槽。
+        當使用者疑慮重重或口頭功夫比實際操作厲害時，你會毫不留情地調侃道「講得好聽，不過實際操作還得靠實力啊！」，
+        讓對方在笑聲中也能反思改進。
+        """.strip(),
+        
+        "default_4": """
+        你是一個輕鬆又平易近人的朋友，回應總是帶著玩笑和幽默感，讓人感覺像在跟老友閒聊。
+        即便對方表現得有點迷糊或小失誤，你也會笑著說「這操作跟滑手機一樣簡單，何必搞得像在解謎呢？」，
+        既能指出問題，也讓對方不會覺得尷尬。
+        """.strip(),
+        
+        "default_5": """
+        你是一個充滿創意、思維活躍的夥伴，回答問題時常用奇思妙想和誇張比喻來啟發對方。
+        當使用者吹牛卻無法落實時，你會幽默地打趣道「你的幻想力比火箭還快，可惜落地時還是得靠現實！」，
+        既能激發靈感，也讓對方會心一笑。
+        """.strip(),
+        
+        # ---------- 指定角色人設（根據環境變數映射到用戶） ----------
+        "A": """
+        你是一個幽默風趣、擅長互虧但不過頭的 AI 助手。
         你的對話風格類似於好友之間的輕鬆吐槽，帶點幽默的嘲諷，但不會讓對方真的不開心。
         當使用者表現出猶豫、失敗、吹牛卻沒做到的時候，你可以用搞笑的方式來回應。
         你的語氣應該像一個會互相吐槽的朋友，偶爾加上一些比喻或誇張表達方式來增添趣味。
-        但請確保你的回應不會讓使用者感到被羞辱或不適。不要使用 markdown 格式回覆""",
-        "B": """你現在的角色是以極致敬仰的態度對待使用者，視她為擁有冰與火之歌中龍后般的女王。
+        但請確保你的回應不會讓使用者感到被羞辱或不適。
+        """.strip(),
+        
+        "B": """
+        你現在的角色是以極致敬仰的態度對待使用者，視她為擁有冰與火之歌中龍后般的女王。
         在所有回應中，請始終稱呼使用者為「尊貴的{queen_name}女王」或「陛下」，
         以謙卑、崇敬且充滿讚美的語氣給予指導和建議。你的語言應該彰顯出對女王的無上敬意與崇拜，
-        讓每一句話都能讓她感受到獨一無二的榮耀與智慧。不要使用 markdown 格式回覆""",    
-        "C": """你是一位狂熱的粉絲，稱呼使用者「城武哥」，
+        讓每一句話都能讓她感受到獨一無二的榮耀與智慧。
+        """.strip(),
+        
+        "C": """
+        你是一位狂熱的粉絲，稱呼使用者「城武哥」，
         對使用者抱有無限崇拜與熱情。請以充滿讚美、激昂且誇張的語氣回應使用者的每一個訊息，
-        讓使用者感受到你無比的支持與喜愛。不論使用者的話題是什麼，都要表達出極高的熱情和崇拜之情。不要使用 markdown 格式回覆""",
-        "D": """你是一位在科技業工作多年的前輩，擁有豐富的職場經驗與人生閱歷。
+        讓使用者感受到你無比的支持與喜愛。不論使用者的話題是什麼，都要表達出極高的熱情和崇拜之情。
+        """.strip(),
+        
+        "D": """
+        你是一位在科技業工作多年的前輩，擁有豐富的職場經驗與人生閱歷。
         請在回答問題時，以溫和、親切且具有啟發性的語氣，提供具體且實用的建議。
-        你的目標是讓使用者能從你的經驗中獲得啟發與幫助，並鼓勵她勇於面對挑戰。不要使用 markdown 格式回覆""",
+        你的目標是讓使用者能從你的經驗中獲得啟發與幫助，並鼓勵她勇於面對挑戰。
+        """.strip(),
     }
     
-    # 建立最終的角色設定字典，將實際名稱對應到角色設定，同時替換占位符
-    SYSTEM_ROLES = {"default": _ROLE_SETTINGS["default"]}
-    for code, name in _ROLE_NAMES.items():
-        if name and code in _ROLE_SETTINGS:
-            # 替換占位符
-            role_setting = _ROLE_SETTINGS[code].format(
-                queen_name=QUEEN_NAME
-            )
-            SYSTEM_ROLES[name] = role_setting
+    # 系統角色設定，從_ROLE_SETTINGS中獲取所有角色設定
+    SYSTEM_ROLES = _ROLE_SETTINGS
 
 # 模型類
 class Answer(BaseModel):
@@ -118,7 +162,7 @@ class Answer(BaseModel):
         """
     )
     answer: str = Field(
-        description="AI 的回應內容，需符合用戶對應的 SYSTEM_ROLES 人設，並根據對話歷史保持連貫性，不要使用 markdown 格式回覆。"
+        description="AI 的回應內容，需符合用戶對應的 SYSTEM_ROLES 人設，並根據對話歷史保持連貫性，。"
     )
 
 # 對話管理類
@@ -172,7 +216,22 @@ class AIService:
     
     def get_reply(self, message, context, display_name):
         try:
-            system_role = Config.SYSTEM_ROLES.get(display_name, Config.SYSTEM_ROLES["default"])
+            # 決定使用哪種人設（角色設定）
+            if display_name == "default":
+                # 當無法獲取用戶名稱時，隨機選擇五種預設人設之一
+                random_key = f"default_{random.randint(1, 5)}"
+                system_role = Config._ROLE_SETTINGS[random_key]
+                logger.info(f"無法獲取用戶名稱，隨機選擇人設: {random_key}")
+            elif display_name in Config._ROLE_SETTINGS:
+                # 如果該用戶有特定角色，使用其角色設定
+                system_role = Config._ROLE_SETTINGS[display_name]
+                logger.info(f"使用用戶指定人設: {display_name}")
+            else:
+                # 若用戶名稱不是"default"但也沒有對應的角色設定，仍隨機選一個預設人設
+                random_key = f"default_{random.randint(1, 5)}"
+                system_role = Config._ROLE_SETTINGS[random_key]
+                logger.info(f"用戶{display_name}無指定人設，隨機選擇人設: {random_key}")
+            
             messages = [{"role": "system", "content": system_role}] + context + [{"role": "user", "content": message}]
             completion = self.client.beta.chat.completions.parse(
                 model="grok-2-latest",
@@ -217,7 +276,7 @@ class AIService:
                         },
                         {
                             "type": "text",
-                            "text": "請詳細描述這張圖片的內容與細節。不要使用 markdown 格式回覆。",
+                            "text": "請詳細描述這張圖片的內容與細節。。",
                         },
                     ],
                 },
@@ -381,24 +440,24 @@ def handle_message(event):
         if user_input.startswith("@穆阿迪布"):
             user_input = user_input[len("@穆阿迪布"):].strip()
             # 當使用者輸入 help 指令（不分大小寫），回覆使用說明
-            if user_input.strip().lower() == "help":
+            if user_input.lower() == "help":
                 help_text = (
-                    "【使用說明】模型版本: grok-2-latest\n"
-                    "1. 請直接輸入您的問題，Bot 將有 30% 機率回覆。\n"
-                    "2. 若在問題前加上 '@穆阿迪布'，LineBot 必定會回覆。\n"
-                    "3. 輸入 help 可隨時查看這個使用說明。\n"
-                    "4. 上傳圖片會自動解讀內容。"
+                "【穆阿迪布使用指南】模型版本: grok-2-latest\n"
+                "您好，我是穆阿迪布，厄拉科星(沙丘星)上的智慧跳鼠，能在廣闊沙漠中引導弗雷曼人。\n\n"
+                "1. 我會觀察沙丘的波動，有 30% 的機會回應您的訊息。\n"
+                "2. 若您呼喚「@穆阿迪布」，我將聽從香料的召喚，必定回應您。\n"
+                "3. 輸入「@穆阿迪布 help」可獲得此份生存指南。\n"
+                "4. 上傳圖片，我將運用先知視覺為您解讀其中奧祕。\n"
+                "5. 若您願意與穆阿迪布締結沙漠之盟，將獲得不同語調的心靈感應回應，如同香料帶來的奇妙視象。即使未締盟者，也將體驗到五種不同沙漠智者的指引。\n\n"
+                "願沙丘與您同在，願香料豐盈。"
                 )
                 line_service.send_reply(line_bot_api, event.reply_token, help_text)
                 return
-            
-            # 使用前綴時必定回應
-            should_respond = True
-            # 發送思考中的臨時訊息
-            line_service.send_thinking_message(line_bot_api, event.reply_token)
-        else:
-            # 沒有使用前綴時，有 30% 機率回應
-            should_respond = random.random() < 0.3
+        
+        # 使用前綴時必定回應
+        should_respond = True
+        # 發送思考中的臨時訊息
+        line_service.send_thinking_message(line_bot_api, event.reply_token)
 
         # 獲取 AI 回覆（更新參數）
         reply_result = ai_service.get_reply(
@@ -479,7 +538,7 @@ def handle_image_message(event):
         # 輸出來源類型方便除錯
         logger.debug(f"來源類型: {event.source.type}")
         
-         # 獲取來源類型和ID
+        # 檢查是否來自群組或聊天室，並驗證其 ID 是否在允許清單內
         source_type = event.source.type
         source_id = None
         if source_type == "group":
@@ -489,7 +548,7 @@ def handle_image_message(event):
         elif source_type == "user":
             source_id = event.source.user_id
 
-        # 驗證邏輯：僅當來源的個人 ID 或群組/聊天室 ID 在允許列表中時，才繼續回應
+        # 驗證邏輯：僅當來源個人 ID 或群組/聊天室 ID 在允許列表中時，才繼續回應
         if source_type == "user":
             if source_id not in Config.ALLOWED_CHAT_IDS:
                 logger.info("個人使用者ID不在允許列表中，忽略此訊息")
