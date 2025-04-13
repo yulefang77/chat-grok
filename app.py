@@ -2,7 +2,6 @@
 import logging
 import os
 import random
-from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -15,7 +14,7 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from openai import OpenAI
-from pydantic import BaseModel, Field
+import pytz
 
 # 載入環境變數
 load_dotenv()
@@ -52,11 +51,13 @@ class Config:
 
 常用指令：
 - @沙迪鼠 help：顯示此說明
+- @沙迪鼠 history：顯示最近的對話記錄
 - @沙迪鼠 <你的問題>：直接詢問任何問題
 
 注意事項：
 - 回答會遵循精簡原則，限制在 200 字以內
 - 機器人擅長以專業和幽默的方式回答問題
+- 歷史記錄會保存最近 10 則對話，30 分鐘後自動清除
 
 技術資訊：
 - AI 模型：X.AI Grok-3 Mini Fast Beta
@@ -64,29 +65,43 @@ class Config:
 - 回應限制：每則 200 字以內
     """.strip()
 
-class Answer(BaseModel):
-    answer: str = Field(description="AI 的回應內容")
-
 class ConversationManager:
     def __init__(self):
+        # 使用 defaultdict 儲存對話歷史和最後更新時間
         self.conversations = defaultdict(list)
-        self.last_update = defaultdict(datetime.now)
+        self.last_update = defaultdict(lambda: datetime.now(pytz.timezone('Asia/Taipei')))
     
     def _generate_conversation_id(self, source_type: str, chat_id: str, user_id: str) -> str:
-        """生成對話ID，用於區分不同場景下的使用者"""
+        """生成對話ID：
+        - 個人對話：user_{user_id}
+        - 群組對話：group_{chat_id}_{user_id}
+        - 聊天室：room_{chat_id}_{user_id}
+        """
         if source_type == 'user':
-            return user_id
-        else:  # group 或 room
-            return f"{chat_id}_{user_id}"
+            return f"user_{user_id}"
+        elif source_type == 'group':
+            return f"group_{chat_id}_{user_id}"
+        else:  # room
+            return f"room_{chat_id}_{user_id}"
+    
+    def _is_conversation_expired(self, conversation_id: str) -> bool:
+        """檢查對話是否過期"""
+        current_time = datetime.now(pytz.timezone('Asia/Taipei'))
+        return (current_time - self.last_update[conversation_id]) > timedelta(minutes=Config.HISTORY_EXPIRE_MINUTES)
     
     def add_message(self, source_type: str, chat_id: str, user_id: str, role: str, content: str):
-        current_time = datetime.now()
+        current_time = datetime.now(pytz.timezone('Asia/Taipei'))
         conversation_id = self._generate_conversation_id(source_type, chat_id, user_id)
         
-        # 清除過期對話
-        if (current_time - self.last_update[conversation_id]) > timedelta(minutes=Config.HISTORY_EXPIRE_MINUTES):
+        # 記錄對話ID的生成
+        logger.info(f"處理對話: ID={conversation_id}, source_type={source_type}, chat_id={chat_id}, user_id={user_id}")
+        
+        # 檢查是否過期 (30分鐘)，過期則清空對話
+        if self._is_conversation_expired(conversation_id):
+            logger.info(f"對話 {conversation_id} 已過期，清除歷史")
             self.conversations[conversation_id] = []
         
+        # 加入新訊息，並確保只保留最近 10 則
         self.conversations[conversation_id].append({"role": role, "content": content})
         if len(self.conversations[conversation_id]) > Config.MAX_HISTORY:
             self.conversations[conversation_id] = self.conversations[conversation_id][-Config.MAX_HISTORY:]
@@ -94,7 +109,9 @@ class ConversationManager:
     
     def get_history(self, source_type: str, chat_id: str, user_id: str) -> list:
         conversation_id = self._generate_conversation_id(source_type, chat_id, user_id)
-        return self.conversations.get(conversation_id, [])
+        history = self.conversations.get(conversation_id, [])
+        logger.info(f"獲取歷史對話: ID={conversation_id}, 訊息數量={len(history)}")
+        return history
 
 class AIService:
     def __init__(self, api_key, base_url):
@@ -205,9 +222,30 @@ def handle_message(event):
             # 移除前綴並清理空白
             user_input = user_input[len(bot_prefix):].strip()
             
-            # 檢查是否為 help 指令
+            # 檢查特殊指令
             if user_input.lower() == 'help':
                 line_service.send_reply(line_bot_api, event.reply_token, Config.HELP_MESSAGE)
+                return
+            elif user_input.lower() == 'history':
+                # 獲取歷史對話
+                history = conversation_manager.get_history(source_type, chat_id, user_id)
+                if not history:
+                    line_service.send_reply(line_bot_api, event.reply_token, "目前沒有對話記錄。")
+                    return
+                
+                # 格式化歷史對話
+                current_time = datetime.now(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M:%S")
+                history_text = f"最近的對話記錄 (更新時間：{current_time})\n"
+                history_text += "=" * 30 + "\n\n"
+
+                for i, msg in enumerate(history, 1):
+                    role = "👤 使用者" if msg["role"] == "user" else "🐭 沙迪鼠"
+                    content = msg["content"][:30] + "..." if len(msg["content"]) > 30 else msg["content"]
+                    history_text += f"{role}: {content}\n\n"
+                
+                history_text += "=" * 30  # 底部分隔線
+
+                line_service.send_reply(line_bot_api, event.reply_token, history_text)
                 return
         # 非個人聊天的隨機回覆
         elif random.random() < Config.RANDOM_REPLY_RATE:
@@ -221,6 +259,12 @@ def handle_message(event):
         # 使用對話管理
         conversation_manager.add_message(source_type, chat_id, user_id, "user", user_input)
         context = conversation_manager.get_history(source_type, chat_id, user_id)
+        
+        # 檢查 context 內容
+        logger.info(f"目前對話脈絡：")
+        for i, msg in enumerate(context, 1):
+            logger.info(f"  {i}. {msg['role']}: {msg['content'][:30]}...")
+        
         reply = ai_service.get_reply(user_input, context)
         conversation_manager.add_message(source_type, chat_id, user_id, "assistant", reply)
         
